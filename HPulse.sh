@@ -18,7 +18,7 @@ SCRIPT_DIR="$(dirname "$TRUST_SCRIPT_PATH")"
 SETUP_MARKER_FILE="/var/lib/frpulse/.setup_complete" # Changed TrustTunnel to FRPulse
 
 # --- Script Version ---
-SCRIPT_VERSION="1.6.0" # Define the script version - UPDATED TO 1.6.0
+SCRIPT_VERSION="1.7.0" # Define the script version - UPDATED TO 1.7.0
 
 # --- Helper Functions ---
 
@@ -523,6 +523,114 @@ install_hysteria_action() {
   read -p ""
 }
 
+# New function for Port Hopping Configuration
+configure_port_hopping_action() {
+  clear
+  echo ""
+  draw_line "$CYAN" "=" 40
+  echo -e "${CYAN}     🦘 Port Hopping Management${RESET}"
+  draw_line "$CYAN" "=" 40
+  echo ""
+
+  echo -e "  ${YELLOW}1)${RESET} ${GREEN}Enable Port Hopping${RESET}"
+  echo -e "  ${YELLOW}2)${RESET} ${RED}Disable Port Hopping${RESET}"
+  echo -e "  ${YELLOW}3)${RESET} ${WHITE}Back to previous menu${RESET}"
+  echo ""
+  read -p "👉 Your choice: " ph_choice
+  echo ""
+
+  if [[ "$ph_choice" == "3" ]]; then
+    return
+  fi
+
+  local action_flag="-A"
+  local action_verb="enabled"
+  if [[ "$ph_choice" == "2" ]]; then
+    action_flag="-D"
+    action_verb="disabled"
+  elif [[ "$ph_choice" != "1" ]]; then
+    print_error "Invalid choice."
+    echo -e "${YELLOW}Press Enter to return to previous menu...${RESET}"
+    read -p ""
+    return
+  fi
+
+  # Detect Interface
+  local interface=$(ip route | grep default | awk '{print $5}' | head -n1)
+  if [[ -z "$interface" ]]; then
+      interface="eth0" # Fallback
+  fi
+  
+  echo -e "${CYAN}Detected network interface: ${WHITE}$interface${RESET}"
+  echo -e "${YELLOW}If this is incorrect, please enter the correct interface name (or press Enter to use detected):${RESET}"
+  read -p "👉 " user_interface
+  if [[ -n "$user_interface" ]]; then
+      interface="$user_interface"
+  fi
+  echo ""
+
+  echo -e "${CYAN}Select IP Version:${RESET}"
+  echo -e "  ${YELLOW}1)${RESET} ${WHITE}IPv4${RESET}"
+  echo -e "  ${YELLOW}2)${RESET} ${WHITE}IPv6${RESET}"
+  echo -e "  ${YELLOW}3)${RESET} ${WHITE}IPv4 & IPv6${RESET}"
+  read -p "👉 Your choice (1-3): " ip_ver_choice
+  echo ""
+
+  local start_port
+  local end_port
+  while true; do
+      echo -e "👉 ${WHITE}Enter Start Port (e.g., 20000):${RESET} "
+      read -p "" start_port
+      if validate_port "$start_port"; then break; else print_error "Invalid port."; fi
+  done
+
+  while true; do
+      echo -e "👉 ${WHITE}Enter End Port (e.g., 50000):${RESET} "
+      read -p "" end_port
+      if validate_port "$end_port" && (( end_port >= start_port )); then break; else print_error "Invalid port or less than start port."; fi
+  done
+  echo ""
+
+  local target_port
+  while true; do
+      echo -e "👉 ${WHITE}Enter Target Hysteria Server Port (e.g., 443):${RESET} "
+      read -p "" target_port
+      if validate_port "$target_port"; then break; else print_error "Invalid port."; fi
+  done
+  echo ""
+
+  # Execute Commands
+  if [[ "$ip_ver_choice" == "1" || "$ip_ver_choice" == "3" ]]; then
+      echo -e "${CYAN}Applying IPv4 rules...${RESET}"
+      # iptables -t nat -A PREROUTING -i eth0 -p udp --dport 20000:50000 -j REDIRECT --to-ports 443
+      if sudo iptables -t nat "$action_flag" PREROUTING -i "$interface" -p udp --dport "${start_port}:${end_port}" -j REDIRECT --to-ports "$target_port" 2>/dev/null; then
+          print_success "IPv4 Port Hopping $action_verb."
+      else
+          print_error "Failed to apply IPv4 rule. (Maybe it doesn't exist or iptables is missing?)"
+      fi
+  fi
+
+  if [[ "$ip_ver_choice" == "2" || "$ip_ver_choice" == "3" ]]; then
+      echo -e "${CYAN}Applying IPv6 rules...${RESET}"
+      # ip6tables -t nat -A PREROUTING -i eth0 -p udp --dport 20000:50000 -j REDIRECT --to-ports 443
+      if sudo ip6tables -t nat "$action_flag" PREROUTING -i "$interface" -p udp --dport "${start_port}:${end_port}" -j REDIRECT --to-ports "$target_port" 2>/dev/null; then
+          print_success "IPv6 Port Hopping $action_verb."
+      else
+          print_error "Failed to apply IPv6 rule. (Check if ip6tables is enabled/supported)"
+      fi
+  fi
+
+  if [[ "$ph_choice" == "1" ]]; then
+      echo ""
+      echo -e "${YELLOW}⚠️  IMPORTANT: These rules are not persistent across reboots.${RESET}"
+      echo -e "${YELLOW}   Please install 'iptables-persistent' or use a startup script to save them.${RESET}"
+  fi
+
+  echo ""
+  echo -e "${YELLOW}Press Enter to return to previous menu...${RESET}"
+  read -p ""
+}
+
 # New function for adding a Hysteria server
 add_new_hysteria_server_action() {
   clear
@@ -1006,29 +1114,100 @@ add_new_hysteria_client_action() {
   echo -e "${CYAN}⚙️ Client Configuration:${RESET}"
 
   local server_address
+  local server_port_string=""
+  local is_port_hopping=false
+  
   while true; do
-    echo -e "👉 ${WHITE}Enter server address (IPv4/IPv6 or domain, e.g., example.com, 192.168.1.1, 2a05:fc1:40:a1::2):${RESET} "
-    read -p "" server_address
-    if validate_host "$server_address"; then
-      break
+    echo -e "👉 ${WHITE}Enter server address (IPv4/IPv6 or domain).${RESET}"
+    echo -e "   ${YELLOW}For Single Port: Just enter the domain/IP (e.g., example.com)${RESET}"
+    echo -e "   ${YELLOW}For Port Hopping: Enter domain:port-range (e.g., example.com:20000-50000)${RESET}"
+    read -p "👉 " input_address
+    
+    # Check if input has port/range
+    # Regex to capture host and port. 
+    # Case 1: [IPv6]:port
+    if [[ "$input_address" =~ ^\[(.*)\]:([0-9,-]+)$ ]]; then
+        host_part="${BASH_REMATCH[1]}"
+        port_part="${BASH_REMATCH[2]}"
+        if validate_host "$host_part"; then
+             server_address="[$host_part]" # Keep brackets for config
+             server_port_string="$port_part"
+             if [[ "$server_port_string" =~ [,-] ]]; then is_port_hopping=true; fi
+             break
+        else
+             print_error "Invalid host part: $host_part"
+        fi
+    # Case 2: host:port (IPv4 or Domain)
+    elif [[ "$input_address" =~ ^([^:]+):([0-9,-]+)$ ]]; then
+        host_part="${BASH_REMATCH[1]}"
+        port_part="${BASH_REMATCH[2]}"
+        if validate_host "$host_part"; then
+             server_address="$host_part"
+             server_port_string="$port_part"
+             if [[ "$server_port_string" =~ [,-] ]]; then is_port_hopping=true; fi
+             break
+        else
+             print_error "Invalid host part: $host_part"
+        fi
+    # Case 3: Just host (IPv4, IPv6, Domain)
+    elif validate_host "$input_address"; then
+        if [[ "$input_address" =~ : ]]; then
+            server_address="[$input_address]" # Add brackets for IPv6
+        else
+            server_address="$input_address"
+        fi
+        break
     else
-      print_error "Invalid server address format. Please try again."
+        print_error "Invalid address format."
     fi
   done
   echo ""
 
-  local server_port
-  while true; do
-    echo -e "👉 ${WHITE}Enter server port (1-65535, e.g., 443, 8443):${RESET} "
-    read -p "" server_port_input
-    server_port=${server_port_input:-443}
-    if validate_port "$server_port"; then
-      break
-    else
-      print_error "Invalid port number. Please enter a number between 1 and 65535."
-    fi
-  done
+  # If port was not provided in address, ask for it
+  if [[ -z "$server_port_string" ]]; then
+      while true; do
+        echo -e "👉 ${WHITE}Enter server port(s).${RESET}"
+        echo -e "   ${YELLOW}Single port (443), list (443,8443), or range (20000-50000):${RESET}"
+        read -p "👉 " server_port_input
+        if [[ "$server_port_input" =~ ^[0-9,-]+$ ]]; then
+             server_port_string="$server_port_input"
+             if [[ "$server_port_string" =~ [,-] ]]; then
+                is_port_hopping=true
+             fi
+             break
+        else
+             print_error "Invalid port format."
+        fi
+      done
+  fi
   echo ""
+
+  local hop_interval_config=""
+  if [[ "$is_port_hopping" == "true" ]]; then
+      echo -e "${CYAN}Port Hopping detected!${RESET}"
+      echo -e "👉 ${WHITE}Set Hop Interval in seconds (Default: 30).${RESET}"
+      echo -e "   ${YELLOW}Enter 0 to disable hopping explicitly, or just press Enter for default (30s).${RESET}"
+      read -p "👉 Enter interval (e.g., 30): " hop_interval_input
+      
+      # Set default to 30 if empty
+      if [[ -z "$hop_interval_input" ]]; then
+          hop_interval_input="30"
+      fi
+
+      if [[ "$hop_interval_input" =~ ^[0-9]+$ ]]; then
+          hop_interval_config="transport:
+  type: udp
+  udp:
+    hopInterval: ${hop_interval_input}s"
+          print_success "Hop Interval set to ${hop_interval_input}s"
+      else
+          print_error "Invalid input. Defaulting to 30s."
+          hop_interval_config="transport:
+  type: udp
+  udp:
+    hopInterval: 30s"
+      fi
+  fi
 
   local password
   while true; do
@@ -1303,11 +1482,12 @@ quic:
   # Create the Hysteria client config file (YAML)
   echo -e "${CYAN}📝 Creating hysteria-client-${client_name}.yaml configuration file...${RESET}"
   cat <<EOF > "$config_file_path"
-server: "[$server_address]:$server_port" # Updated to include brackets around server address
+server: "$server_address:$server_port_string" # Updated for Port Hopping support
 auth: "$password" # Updated password format
 $tls_config
 $obfs_config
 ${masquerade_config} # Optional masquerade
+${hop_interval_config} # Optional hopInterval for Port Hopping
 
 $(if [[ -n "$udp_forwarding_content" ]]; then echo "udpForwarding:"; echo -e "$udp_forwarding_content"; echo ""; fi) # Always include header, add extra newline
 $(if [[ -n "$tcp_forwarding_content" ]]; then echo "tcpForwarding:"; echo -e "$tcp_forwarding_content"; fi) # Always include header
@@ -1989,7 +2169,8 @@ while true; do
               echo -e "  ${YELLOW}3)${RESET} ${WHITE}Delete a Hysteria server${RESET}"
               echo -e "  ${YELLOW}4)${RESET} ${MAGENTA}Schedule Hysteria server restart${RESET}"
               echo -e "  ${YELLOW}5)${RESET} ${RED}Delete scheduled restart${RESET}"
-              echo -e "  ${YELLOW}6)${RESET} ${WHITE}Back to previous menu${RESET}"
+              echo -e "  ${YELLOW}6)${RESET} ${GREEN}Port Hopping Management${RESET}"
+              echo -e "  ${YELLOW}7)${RESET} ${WHITE}Back to previous menu${RESET}"
               echo ""
               draw_line "$CYAN" "-" 40
               echo -e "👉 ${CYAN}Your choice:${RESET} "
@@ -2124,6 +2305,9 @@ while true; do
                   delete_cron_job_action
                   ;;
                 6)
+                  configure_port_hopping_action
+                  ;;
+                7)
                   echo -e "${YELLOW}Returning to previous menu...${RESET}"
                   break # Break out of this while loop to return to Hysteria Tunnel Management
                   ;;
